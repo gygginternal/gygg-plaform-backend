@@ -1,73 +1,63 @@
-import mongoose from 'mongoose';
+import mongoose from "mongoose";
 
-const contractSchema = new mongoose.Schema({
-  gig: {
-    type: mongoose.Schema.ObjectId,
-    ref: 'Gig',
-    required: [true, 'A contract must be associated with a gig.']
-  },
-  provider: {
-    type: mongoose.Schema.ObjectId,
-    ref: 'User',
-    required: [true, 'A contract must have a provider (gig poster).']
-  },
-  tasker: {
-    type: mongoose.Schema.ObjectId,
-    ref: 'User',
-    required: [true, 'A contract must have a tasker assigned.']
-  },
-  agreedCost: {
-    type: Number,
-    required: [true, 'A contract must have an agreed cost.'],
-    min: [0, 'Agreed cost cannot be negative.']
-  },
+const contractSchema = new mongoose.Schema(
+  {
+    gig: {
+      type: mongoose.Schema.ObjectId,
+      ref: "Gig",
+      required: [true, "A contract must be associated with a gig."],
+    },
+    provider: {
+      type: mongoose.Schema.ObjectId,
+      ref: "User",
+      required: [true, "A contract must have a provider (gig poster)."],
+    },
+    tasker: {
+      type: mongoose.Schema.ObjectId,
+      ref: "User",
+      required: [true, "A contract must have a tasker assigned."],
+    },
+    agreedCost: {
+      type: Number,
+      required: [true, "A contract must have an agreed cost."],
+      min: [0, "Agreed cost cannot be negative."],
+    },
 
-  // Status flow of the contract
-  status: {
-    type: String,
-    enum: [
-      'pending_acceptance',        // Awaiting tasker's response to the offer
-      'pending_payment',           // Accepted by tasker, waiting for provider to pay
-      'active',                    // Payment secured, task in progress
-      'submitted',                 // Tasker marked task as completed
-      'revision_requested',        // Provider requested changes (optional flow)
-      'approved',                  // Provider approved submission
-      'completed',                 // Payment released, contract finalized
-      'disputed',                  // Dispute raised by either party
-      'cancelled_by_provider',     // Cancelled by provider
-      'cancelled_by_tasker',       // Cancelled by tasker
-      'cancelled_mutual'           // Cancelled mutually
-    ],
-    default: 'pending_acceptance',
-    required: true
-  },
+    // Status flow of the contract
+    status: {
+      type: String,
+      default: "pending_acceptance",
+      required: true,
+    },
 
-  terms: {
-    type: String,
-    trim: true
-  },
+    terms: {
+      type: String,
+      trim: true,
+    },
 
-  // Timestamp fields related to contract progress
-  taskerAcceptedAt: {
-    type: Date
+    // Timestamp fields related to contract progress
+    taskerAcceptedAt: {
+      type: Date,
+    },
+    workSubmittedAt: {
+      type: Date,
+    },
+    providerApprovedAt: {
+      type: Date,
+    },
+    completedAt: {
+      type: Date,
+    },
+    cancelledAt: {
+      type: Date,
+    },
+    cancellationReason: {
+      type: String,
+      trim: true,
+    },
   },
-  workSubmittedAt: {
-    type: Date
-  },
-  providerApprovedAt: {
-    type: Date
-  },
-  completedAt: {
-    type: Date
-  },
-  cancelledAt: {
-    type: Date
-  },
-  cancellationReason: {
-    type: String,
-    trim: true
-  }
-}, { timestamps: true }); // Automatically adds createdAt and updatedAt
+  { timestamps: true }
+); // Automatically adds createdAt and updatedAt
 
 // Indexes for performance and uniqueness
 contractSchema.index({ gig: 1 }, { unique: true }); // Only one contract per gig
@@ -77,49 +67,51 @@ contractSchema.index({ tasker: 1, status: 1 });
 // Auto-populate references when querying
 contractSchema.pre(/^find/, function (next) {
   this.populate({
-    path: 'provider',
-    select: 'firstName lastName profileImage'
+    path: "provider",
   })
     .populate({
-      path: 'tasker',
-      select: 'firstName lastName profileImage'
+      path: "tasker",
     })
     .populate({
-      path: 'gig',
-      select: 'title status cost'
+      path: "gig",
+      select: "title status cost",
     });
   next();
 });
 
 // Auto-set timestamp fields when status changes
-contractSchema.pre('save', function (next) {
-  if (this.isModified('status')) {
+contractSchema.pre("save", function (next) {
+  if (this.isModified("status")) {
     const now = Date.now();
     switch (this.status) {
-      case 'submitted':
+      case "submitted":
         if (!this.workSubmittedAt) this.workSubmittedAt = now;
         break;
-      case 'approved':
+      case "approved":
         if (!this.providerApprovedAt) this.providerApprovedAt = now;
         break;
-      case 'completed':
+      case "completed":
         if (!this.completedAt) this.completedAt = now;
         break;
-      case 'cancelled_by_provider':
-      case 'cancelled_by_tasker':
-      case 'cancelled_mutual':
+      case "cancelled_by_provider":
+      case "cancelled_by_tasker":
+      case "cancelled_mutual":
         if (!this.cancelledAt) this.cancelledAt = now;
         break;
     }
   }
 
   // If the contract is new and already in pending_payment (i.e., tasker has accepted)
-  if (this.isNew && this.status === 'pending_payment' && !this.taskerAcceptedAt) {
+  if (
+    this.isNew &&
+    this.status === "pending_payment" &&
+    !this.taskerAcceptedAt
+  ) {
     this.taskerAcceptedAt = Date.now();
   }
 
   next();
 });
 
-const Contract = mongoose.model('Contract', contractSchema);
+const Contract = mongoose.model("Contract", contractSchema);
 export default Contract;

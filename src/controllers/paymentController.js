@@ -9,6 +9,157 @@ import mongoose from "mongoose";
 // Initialize Stripe with the secret key from environment variables
 export const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
+export const checkIfContractIsReleasable = catchAsync(
+  async (req, res, next) => {
+    const { contractId } = req.params;
+
+    // Retrieve the payment record from the database
+    const payment = await Payment.findOne({ contract: contractId }).populate(
+      "payee"
+    );
+
+    if (!payment) {
+      return next(new AppError("Payment not found for this contract.", 404));
+    }
+
+    // Check if the payment status is valid for release
+    const isPayoutReady = payment.status === "succeeded";
+
+    // Retrieve the available balance from Stripe
+    const balance = await stripe.balance.retrieve({
+      stripeAccount: payment.payee.stripeAccountId,
+    });
+    console.log(JSON.stringify({ balance }, null, 2));
+
+    const available = balance.available.find(
+      (b) => b.currency === payment.currency
+    );
+    const payoutAvailable = available ? available.amount : 0;
+
+    // Check if the available balance is sufficient
+    const isBalanceSufficient =
+      payoutAvailable >= payment.amountReceivedByPayee;
+
+    // Determine if the contract is releasable
+    const isReleasable = isPayoutReady && isBalanceSufficient;
+
+    res.status(200).json({
+      status: "success",
+      data: {
+        isReleasable,
+        isPayoutReady,
+        isBalanceSufficient,
+        payoutAvailable: (payoutAvailable / 100).toFixed(2),
+        requiredAmount: (payment.amountReceivedByPayee / 100).toFixed(2),
+        currency: payment.currency.toUpperCase(),
+      },
+    });
+  }
+);
+
+export const createStripeLoginLink = catchAsync(async (req, res, next) => {
+  const tasker = req.user;
+
+  // Ensure the tasker has a Stripe account ID
+  if (!tasker.stripeAccountId) {
+    return next(
+      new AppError("You do not have a connected Stripe account.", 400)
+    );
+  }
+
+  // Generate a login link for the tasker's Stripe Express account
+  const loginLink = await stripe.accounts.createLoginLink(
+    tasker.stripeAccountId
+  );
+
+  if (!loginLink || !loginLink.url) {
+    return next(new AppError("Failed to generate Stripe login link.", 500));
+  }
+
+  res.status(200).json({
+    status: "success",
+    data: {
+      loginLink: loginLink.url,
+    },
+  });
+});
+
+export const getPaymentIntentForContract = catchAsync(
+  async (req, res, next) => {
+    const { contractId } = req.params;
+
+    // Retrieve the payment intent from the database or payment provider (e.g., Stripe)
+    const payment = await Payment.findOne({ contract: contractId });
+    console.log({ payment });
+
+    if (!payment) {
+      return next(new AppError("Payment not found for this contract.", 404));
+    }
+
+    let paymentIntent;
+    if (payment.stripePaymentIntentId) {
+      paymentIntent = await stripe.paymentIntents.retrieve(
+        payment.stripePaymentIntentId
+      );
+    }
+
+    if (!paymentIntent) {
+      return next(
+        new AppError("Payment intent not found for this contract.", 404)
+      );
+    }
+
+    res.status(200).json({
+      status: "success",
+      data: {
+        paymentIntent,
+        payment,
+      },
+    });
+  }
+);
+
+export const releasePaymentForContract = catchAsync(async (req, res, next) => {
+  const { contractId } = req.params;
+
+  // Retrieve the payment details for the contract
+  const payment = await Payment.findOne({ contract: contractId }).populate(
+    "payee"
+  );
+
+  if (!payment) {
+    return next(new AppError("Payment not found for this contract.", 404));
+  }
+
+  // Create a payout using the payment details
+  const acc = await stripe.accounts.retrieve(payment.payee.stripeAccountId);
+  console.log({ acc });
+
+  const payout = await stripe.payouts.create(
+    {
+      amount: payment.amount,
+      currency: payment.currency,
+    },
+    {
+      stripeAccount: payment.payee.stripeAccountId,
+    }
+  );
+
+  // Update the payment status to "released"
+  payment.status = payout.status;
+  payment.stripePayoutId = payout.id;
+
+  await payment.save();
+
+  res.status(200).json({
+    status: "success",
+    message: "Payment released successfully.",
+    data: {
+      payout,
+    },
+  });
+});
+
 // --- Create Payment Intent for Contract (Provider -> Tasker via Platform) ---
 export const createPaymentIntentForContract = catchAsync(
   async (req, res, next) => {
@@ -20,14 +171,13 @@ export const createPaymentIntentForContract = catchAsync(
       return next(new AppError("Invalid Contract ID format.", 400));
 
     // Fetch the contract along with the tasker details
-    const contract = await Contract.findById(contractId).populate(
-      "tasker",
-      "stripeAccountId stripePayoutsEnabled"
-    );
+    const contract = await Contract.findById(contractId);
+
     if (!contract) return next(new AppError("Contract not found.", 404));
 
     // Check if the provider is authorized to make the payment
-    if (contract.provider.toString() !== providerId)
+
+    if (contract.provider._id.toString() !== providerId)
       return next(
         new AppError("Not authorized to pay for this contract.", 403)
       );
@@ -46,15 +196,16 @@ export const createPaymentIntentForContract = catchAsync(
     }
 
     // Ensure that the tasker has connected a valid Stripe account and has enabled payouts
+
     if (!contract.tasker?.stripeAccountId)
       return next(new AppError("Tasker has not connected Stripe.", 400));
-    if (!contract.tasker?.stripePayoutsEnabled)
-      return next(
-        new AppError(
-          "Tasker Stripe onboarding incomplete or payouts disabled.",
-          400
-        )
-      );
+    // if (!contract.tasker?.stripePayoutsEnabled)
+    //   return next(
+    //     new AppError(
+    //       "Tasker Stripe onboarding incomplete or payouts disabled.",
+    //       400
+    //     )
+    //   );
 
     const taskerStripeAccountId = contract.tasker.stripeAccountId;
     const amountInCents = Math.round(contract.agreedCost * 100); // Total amount provider pays
@@ -63,7 +214,7 @@ export const createPaymentIntentForContract = catchAsync(
 
     // Calculate the application fee based on the platform's percentage and fixed fee
     const feePercentage = parseFloat(process.env.PLATFORM_FEE_PERCENT) || 0;
-    const fixedFeeCents = 500; // Define the fixed fee ($5.00) in cents
+    const fixedFeeCents = 0; // Define the fixed fee ($5.00) in cents
 
     // Calculate percentage part
     const percentageFee = Math.round(amountInCents * (feePercentage / 100));
@@ -101,6 +252,7 @@ export const createPaymentIntentForContract = catchAsync(
         status: "requires_payment_method",
         stripeConnectedAccountId: taskerStripeAccountId,
         applicationFeeAmount: applicationFeeAmount,
+        amountReceivedByPayee: amountInCents - applicationFeeAmount,
       });
     } else if (
       !["requires_payment_method", "failed"].includes(payment.status)
@@ -165,7 +317,10 @@ export const createPaymentIntentForContract = catchAsync(
     } else {
       // If there's no existing payment intent, create one
       paymentIntent = await stripe.paymentIntents.create(paymentIntentParams);
+      console.log({ paymentIntent });
+
       payment.stripePaymentIntentId = paymentIntent.id;
+      payment.stripePaymentIntentSecret = paymentIntent.client_secret;
     }
 
     // Save payment with the payment intent ID
@@ -180,6 +335,31 @@ export const createPaymentIntentForContract = catchAsync(
     });
   }
 );
+
+const handlePayoutPaid = async (dataObject) => {
+  try {
+    // Retrieve the payout ID from the event data
+    const payoutId = dataObject.id;
+
+    // Find the payment record associated with this payout
+    const payment = await Payment.findOne({ stripePayoutId: payoutId });
+
+    if (!payment) {
+      console.error(`❌ Payment record not found for payout ID: ${payoutId}`);
+      return;
+    }
+
+    // Update the payment status to "succeeded"
+    payment.status = "succeeded";
+    await payment.save();
+
+    console.log(
+      `✅ Payment status updated to "succeeded" for payout ID: ${payoutId}`
+    );
+  } catch (error) {
+    console.error(`❌ Error handling payout.paid event: ${error.message}`);
+  }
+};
 
 // --- Stripe Webhook Handler ---
 export const stripeWebhookHandler = async (req, res) => {
@@ -199,23 +379,8 @@ export const stripeWebhookHandler = async (req, res) => {
 
   // Handle different event types from Stripe
   switch (event.type) {
-    case "payment_intent.succeeded":
-      await handlePaymentIntentSucceeded(dataObject);
-      break;
-    case "payment_intent.processing":
-      await handlePaymentIntentProcessing(dataObject);
-      break;
-    case "payment_intent.payment_failed":
-      await handlePaymentIntentFailed(dataObject);
-      break;
-    case "payment_intent.canceled":
-      await handlePaymentIntentCanceled(dataObject);
-      break;
-    case "account.updated":
-      await handleAccountUpdated(dataObject);
-      break;
-    case "charge.refunded":
-      await handleChargeRefunded(dataObject);
+    case "payout.paid": // Handle payout.paid event
+      await handlePayoutPaid(dataObject);
       break;
     default:
       // Log and ignore unhandled events
@@ -235,29 +400,28 @@ export const refundPaymentForContract = catchAsync(async (req, res, next) => {
   const contract = await Contract.findById(contractId);
   if (!contract) return next(new AppError("Contract not found", 404));
 
-  // Check if the user is authorized to refund
-  if (
-    !req.user.role.includes("admin") &&
-    contract.provider.toString() !== req.user.id
-  ) {
-    return next(
-      new AppError("Only admins or the provider can initiate refunds.", 403)
-    );
-  }
-
   const payment = await Payment.findOne({ contract: contractId });
   if (!payment) return next(new AppError("Payment record not found", 404));
-  if (payment.status !== "succeeded")
-    return next(
-      new AppError(`Cannot refund payment with status: ${payment.status}`, 400)
-    );
-  if (!payment.stripeChargeId)
-    return next(new AppError("Cannot refund: Missing Stripe Charge ID.", 500));
+  // if (payment.status !== "succeeded")
+  //   return next(
+  //     new AppError(`Cannot refund payment with status: ${payment.status}`, 400)
+  //   );
+  if (!payment.stripePaymentIntentId)
+    return next(new AppError("Cannot refund: Missing Payment Intent ID.", 500));
 
+  const paymentIntent = await stripe.paymentIntents.retrieve(
+    payment.stripePaymentIntentId,
+    {
+      expand: ["charges"],
+    }
+  );
+  console.log({ paymentIntent });
+
+  const chargeId = paymentIntent.latest_charge;
   try {
     // Initiate the refund via Stripe
     const refund = await stripe.refunds.create({
-      charge: payment.stripeChargeId,
+      charge: chargeId,
     });
     console.log(
       `Stripe Refund created: ${refund.id}, Status: ${refund.status}`
@@ -307,6 +471,13 @@ export const createStripeAccount = catchAsync(async (req, res, next) => {
         transfers: { requested: true },
       },
       business_type: "individual",
+      settings: {
+        payouts: {
+          schedule: {
+            interval: "manual", // Platform will trigger payouts manually
+          },
+        },
+      },
     });
 
     user.stripeAccountId = account.id;
@@ -324,7 +495,7 @@ export const createStripeAccountLink = catchAsync(async (req, res, next) => {
 
   if (!user || !user.stripeAccountId) {
     const account = await stripe.accounts.create({
-      type: "standard",
+      type: "express",
       country: "CA",
       email: user.email,
       capabilities: {
@@ -332,6 +503,13 @@ export const createStripeAccountLink = catchAsync(async (req, res, next) => {
         transfers: { requested: true },
       },
       business_type: "individual",
+      settings: {
+        payouts: {
+          schedule: {
+            interval: "manual", // Platform will trigger payouts manually
+          },
+        },
+      },
     });
 
     user.stripeAccountId = account.id;

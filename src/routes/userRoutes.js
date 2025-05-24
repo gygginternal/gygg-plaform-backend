@@ -33,6 +33,7 @@ import {
   createStripeAccount,
   createStripeAccountLink,
   getStripeAccountStatus,
+  createStripeLoginLink, // Import the new controller function
 } from "../controllers/paymentController.js";
 
 import { uploadS3 } from "../config/s3Config.js"; // S3 Upload middleware
@@ -240,6 +241,7 @@ router.get(
 router.post("/stripe/connect-account", createStripeAccount); // No body input from user
 router.get("/stripe/account-link", createStripeAccountLink); // No params/body
 router.get("/stripe/account-status", getStripeAccountStatus); // No params/body
+router.get("/stripe/login-link", createStripeLoginLink); // Only taskers can access this route
 
 /**
  * ===============================

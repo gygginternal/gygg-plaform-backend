@@ -125,9 +125,9 @@ export const signup = catchAsync(async (req, res, next) => {
   }
 
   const account = await stripe.accounts.create({
-    type: "stanardard",
+    type: "express",
     country: "CA",
-    email: user.email,
+    email: email,
     capabilities: {
       card_payments: { requested: true },
       transfers: { requested: true },
@@ -255,6 +255,8 @@ export const restrictTo = (...allowedRoles) => {
     console.log({ userRoles, allowedRoles });
 
     const hasAccess = userRoles.some((role) => allowedRoles.includes(role));
+    console.log({ hasAccess });
+
     if (!hasAccess) {
       return next(
         new AppError("You do not have permission for this action.", 403)

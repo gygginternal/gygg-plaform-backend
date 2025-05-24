@@ -163,7 +163,6 @@ const userSchema = new mongoose.Schema(
     // Stripe Connect Integration
     stripeAccountId: {
       type: String,
-      select: false,
     },
     stripeChargesEnabled: {
       type: Boolean,
